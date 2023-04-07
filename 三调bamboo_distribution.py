@@ -86,7 +86,8 @@ class TIFDataSet(Dataset):
     def __init__(self, filrpath):
         print(f'reading{filrpath}')
         self.tifNameList = os.listdir(filrpath)
-        self.wdrvi_all = np.zeros((225 * 243, input_dim))
+        self.tifNameList.sort(reverse=True)
+        self.wdrvi_all = np.zeros((658 * 776, input_dim))
         m = 0
         for i in range(len(self.tifNameList)):
             #  判断当前文件是否为HDF文件
@@ -100,10 +101,11 @@ class TIFDataSet(Dataset):
                 self.wdrvi_all[:, m] = data[:, 0]
                 m += 1
         self.x = torch.from_numpy(self.wdrvi_all).to(torch.float32)
+        del self.wdrvi_all
         # self.y = torch.from_numpy(label)
 
     def __len__(self):
-        return self.wdrvi_all.shape[0]
+        return self.x.shape[0]
 
     def __getitem__(self, index):
         return self.x[index]
@@ -124,7 +126,7 @@ class CSVDataSet(Dataset):
         label = df.iloc[:, 0].values
 
         self.x = torch.from_numpy(feat).to(torch.float32)
-        self.y = torch.from_numpy(label)
+        self.y = torch.from_numpy(label).long()
 
     def __len__(self):
         return len(self.y)
@@ -134,38 +136,40 @@ class CSVDataSet(Dataset):
 
 
 if __name__ == '__main__':
-    lstm_feat = np.zeros((1, 10))
-    lstm_feat_4train = np.zeros((1, 10))
+    lstm_feat = np.zeros((1, 20))  # 第二层的输出大小*是否双向lstm
+    lstm_feat_4train = np.zeros((1, 20))
 
-    tifset = TIFDataSet("E:\\城市与区域生态\\大熊猫和竹\\种群动态模拟\\竹分布\\三调modis_ndvi_mod13a1\\wdrvi\\融合后wdrvi\\")
+    tifset = TIFDataSet(r"E:\城市与区域生态\大熊猫和竹\种群动态模拟\岷山竹子分布\岷山矩形三调wdrvi")
     pre_loader = DataLoader(tifset, BATCH_SIZE, shuffle=False)
 
 
-    csvset = CSVDataSet(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo_4xgb.csv ')
+    csvset = CSVDataSet(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\岷山竹子分布\岷山三调样本点.csv')
     train_loader = DataLoader(csvset, BATCH_SIZE, shuffle=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = torch.load(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调model_b5_epo1k_h1_23_h25_lr1e-3.pt')
+    # device = 'cpu'
+
+    model = torch.load(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\岷山竹子分布\三调model_b5_epo1k_h15_24_h5_lr1e-3.pt')
     model.to(device)
     model.eval()
 
     for wdrvi in pre_loader:
         wdrvi = wdrvi.view(-1, sequence_dim, input_dim).requires_grad_().to(device)
         _, out_of_lstm = model(wdrvi)
-        for j in range(BATCH_SIZE):
+        for j in range(out_of_lstm.shape[0]):
             lstm_feat = np.append(lstm_feat, out_of_lstm[j, :, :].cpu().detach().numpy(), 0)
-    lstm_feat = np.delete(lstm_feat, 0, 0)
+    lstm_feat = np.delete(lstm_feat, 0, 0)  # 删除了lstm_feat数字数组的第一行，因为都是append所以第一行都是0
     print("--------用于预测的wdrvi数据经LSTM降维结束----------")
 
     for wdrvi in train_loader:
         wdrvi = wdrvi.view(-1, sequence_dim, input_dim).requires_grad_().to(device)
         _, out_of_lstm = model(wdrvi)
-        for j in range(BATCH_SIZE):
+        for j in range(out_of_lstm.shape[0]):
             lstm_feat_4train = np.append(lstm_feat_4train, out_of_lstm[j, :, :].cpu().detach().numpy(), 0)
     lstm_feat_4train = np.delete(lstm_feat_4train, 0, 0)
     print("--------用于训练xgb的wdrvi数据经LSTM降维结束----------")
 
-    rds = gdal.Open("E:\\城市与区域生态\\大熊猫和竹\\种群动态模拟\\竹分布\\dem_500.tif")
+    rds = gdal.Open(r"E:\城市与区域生态\大熊猫和竹\种群动态模拟\岷山竹子分布\MS_dem.tif")
     cols = rds.RasterXSize
     rows = rds.RasterYSize
     band = rds.GetRasterBand(1)
@@ -174,7 +178,7 @@ if __name__ == '__main__':
     lstm_feat = np.append(lstm_feat, dem, 1)
     print("--------用于预测的数据准备结束（补充dem在最后一列）----------")
 
-    df_4train = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo_4xgb.csv ', header=0, index_col=0,
+    df_4train = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\岷山竹子分布\岷山三调样本点.csv', header=0, index_col=0,
                             encoding='utf-8')
     dem_4train = df_4train.iloc[:, 1].values
     dem_4train = dem_4train.reshape(-1, 1)
@@ -226,7 +230,7 @@ if __name__ == '__main__':
     projection = rds.GetProjectionRef()  # projection
     data_probability.shape = (rows, cols)
     driver = gdal.GetDriverByName('GTiff')
-    dst_filename = "E:/城市与区域生态/大熊猫和竹/种群动态模拟/竹分布/三调竹子分布概率_lstm_xgb.tif"
+    dst_filename = r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\岷山竹子分布\岷山三调竹子概率_lstm_xgb.tif'
     dst_ds = driver.Create(dst_filename, cols, rows, 1, gdal.GDT_Float64)
     dst_ds.SetGeoTransform(list(geotransform))
     srs = osr.SpatialReference()

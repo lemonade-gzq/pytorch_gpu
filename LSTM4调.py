@@ -17,8 +17,8 @@ Dropout层的输入张量形状为(batch_size, sequence_length, my_hidden_dim1 *
 输出张量形状为(batch_size, sequence_length, my_output_dim)。"""
 
 #  训练经验 少量多次，层数少
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cpu')
 print(device)
 BATCH_SIZE = 5
 EPOCHS = 1000
@@ -26,7 +26,7 @@ bidirectional_set = True
 bidirectional = 2 if bidirectional_set else 1
 input_dim = 24
 hidden_dim1 = 15
-hidden_dim2 = 5
+hidden_dim2 = 10
 layer_dim = 1  # 模块中循环层、递归层的数量
 output_dim = 2
 sequence_dim = 1  # 用来指定LSTM模型的输入序列的长度
@@ -52,7 +52,7 @@ class CSVDataSet(Dataset):
 
         self.x = torch.from_numpy(feat).to(torch.float32)
         self.y = torch.from_numpy(label).long()
-        print(self.y)
+        print(self.x)
 
 
     def __len__(self):
