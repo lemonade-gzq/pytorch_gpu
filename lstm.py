@@ -85,7 +85,7 @@ class LSTM_Model(nn.Module):
 
 
 if __name__ == "__main__":
-    train_sets = CSVDataSet(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo.csv ')  # E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo.csv
+    train_sets = CSVDataSet(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo.csv')  # E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo.csv
     test_sets = CSVDataSet(r'E:\城市与区域生态\大熊猫和竹\种群动态模拟\竹分布\三调bamboo_test.csv')
     train_loader = DataLoader(train_sets, BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_sets, BATCH_SIZE, shuffle=True)
