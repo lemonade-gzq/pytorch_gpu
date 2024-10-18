@@ -74,8 +74,8 @@ class TimeSeriesDataset(Dataset):
             encoding='utf-8',
             dtype={'label': np.int32}
         )
-
-        feat = df.iloc[:, 1:].values
+        feat = df.iloc[:, ::-1].values  # 逆序读取列，时间顺序
+        feat = feat[:, 1:71]
         print(f'the shape of feature is {feat.shape}')
         label = df.iloc[:, 0].values
 
@@ -101,13 +101,13 @@ def extract_features(model, dataloader):
 if __name__ == "__main__":
     print(device)
     # 加载数据集
-    dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\卧龙种群动态模拟\主食竹分布模拟\样本点wdrvi.csv')
+    dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\平武种群动态模拟\四调wdrvi\四调竹子样本点.csv')
     trainset, testset = train_test_split(dataset, test_size=0.3, random_state=42)
     train_loader = DataLoader(trainset, batch_size=20, shuffle=True)
     test_loader = DataLoader(testset, batch_size=20, shuffle=True)
 
     # 训练模型
-    model = TransformerLSTMEncoder(input_size=90, nhead=5, num_layers=2, lstm_hidden_size=40,
+    model = TransformerLSTMEncoder(input_size=70, nhead=5, num_layers=2, lstm_hidden_size=35,
                                    lstm_hidden_size2=20, layer_dim=1, output_dim=2).to(device)  # d_model=20,
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -160,5 +160,5 @@ if __name__ == "__main__":
 
     # 提取整个数据集的降维特征向量
     # features = extract_features(model, test_loader)
-    PATH = r'E:\城市与区域生态\大熊猫和竹\卧龙种群动态模拟\主食竹分布模拟\\三调model_inputsize90_nhead10_numlayer2_lstmsize40_20_lr1e-3.pt'
+    PATH = r'E:\城市与区域生态\大熊猫和竹\平武种群动态模拟\四调wdrvi\四调model_inputsize90_nhead5_numlayer2_lstmsize40_20_lr1e-3.pt'
     torch.save(model,PATH)
