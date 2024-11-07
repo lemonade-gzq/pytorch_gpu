@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from xgboost.sklearn import XGBClassifier
 import seaborn as sns
 import matplotlib.pyplot as plt
+import math
 
 bidirectional_set = True
 bidirectional = 2 if bidirectional_set else 1
@@ -24,34 +25,51 @@ accracy_list = []
 iteration_list = []
 
 
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=21):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        # 计算 div_term 时处理奇数 d_model 的情况
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        if d_model % 2 == 0:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:div_term.size(0) - 1])  # 处理奇数情况
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return x + self.pe[:x.size(0), :]
+
+
 # 定义Transformer编码器和LSTM压缩器
-class LSTMEncoder(nn.Module):
-    # d_model,
-    def __init__(self, input_size, lstm_hidden_size, lstm_hidden_size2, layer_dim,
-                 output_dim):
-        super(LSTMEncoder, self).__init__()
+class TransformerLSTMEncoder(nn.Module):
+    def __init__(self, input_size, nhead, lstm_input_size, num_layers, lstm_hidden_size, lstm_hidden_size2, layer_dim, output_dim):
+        super(TransformerLSTMEncoder, self).__init__()
         self.layer_dim = layer_dim
         self.hidden_dim1 = lstm_hidden_size
         self.hidden_dim2 = lstm_hidden_size2
 
-        #  构建模型
-        # self.linear = nn.Linear(input_size, d_model)
-        # Transformer编码器
+        # 位置编码
+        self.pos_encoder = PositionalEncoding(input_size)
 
-        self.lstm = nn.LSTM(input_size, lstm_hidden_size, layer_dim, batch_first=True,
+        # Transformer编码器
+        self.transformer_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=input_size, nhead=nhead), num_layers=num_layers)
+        self.lstm = nn.LSTM(lstm_input_size, lstm_hidden_size, layer_dim, batch_first=True,
                             bidirectional=bidirectional_set)
         self.dropout = nn.Dropout(p=0.5)  # dropout训练
         self.lstm2 = nn.LSTM(lstm_hidden_size * bidirectional, lstm_hidden_size2, layer_dim, batch_first=True,
                              bidirectional=bidirectional_set)
-        # 全连接层
         self.fc = nn.Linear(lstm_hidden_size2 * bidirectional, output_dim)
 
     def forward(self, x):
-        # x = self.linear(x)
         # 使用Transformer编码器对数据信息进行提取
-        x = x.unsqueeze(0)
-        # x = self.transformer_encoder(x)
-        x = x.permute(1, 0, 2)
+        x = self.pos_encoder(x.unsqueeze(0))
+        x = self.transformer_encoder(x)
+        x = x.permute(1, 2, 0)
 
         # 初始化隐层状态全为0
         h1 = torch.zeros(self.layer_dim * bidirectional, x.size(0), self.hidden_dim1).requires_grad_().to(device)
@@ -65,39 +83,11 @@ class LSTMEncoder(nn.Module):
         c2 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim2).requires_grad_().to(device)
         # 分离隐藏状态，避免梯度爆炸
         out_lstm2, (hn, cn) = self.lstm2(out, (h2.detach(), c2.detach()))  # 将输入数据和初始化隐层、记忆单元信息传入
+        out = self.fc(out_lstm2)
 
-        # 以最后一层隐层状态为输出
-        out_liner = self.fc(out_lstm2[:, -1, :])
+        return out[:, -1, :], out_lstm2
 
-        return out_liner, out_lstm2
 
-class TIFDataSet(Dataset):
-    def __init__(self, filrpath):
-        print(f'reading{filrpath}')
-        self.tifNameList = os.listdir(filrpath)
-        self.tifNameList.sort(reverse=True)
-        self.wdrvi_all = np.zeros((486 * 523, 90))
-        m = 89
-        for i in range(len(self.tifNameList)):
-            #  判断当前文件是否为HDF文件
-            if (os.path.splitext(self.tifNameList[i])[-1] == ".tif"):
-                rds = gdal.Open(filrpath + "\\" + self.tifNameList[i])
-                cols = rds.RasterXSize
-                rows = rds.RasterYSize
-                band = rds.GetRasterBand(1)
-                data = band.ReadAsArray(0, 0, cols, rows)
-                data = data.reshape(-1, 1)
-                self.wdrvi_all[:, m] = data[:, 0]
-                m -= 1
-        self.x = torch.from_numpy(self.wdrvi_all).float().to(device)
-        del self.wdrvi_all
-        # self.y = torch.from_numpy(label)
-
-    def __len__(self):
-        return self.x.shape[0]
-
-    def __getitem__(self, index):
-        return self.x[index]
 # 定义数据集
 class TimeSeriesDataset(Dataset):
     def __init__(self, filepath):
@@ -108,8 +98,7 @@ class TimeSeriesDataset(Dataset):
             encoding='utf-8',
             dtype={'label': np.int32}
         )
-        feat = df.iloc[:, ::-1].values  # 逆序读取列，时间顺序
-        feat = feat[:, 0:70]
+        feat = df.iloc[:, :].values[:, 1:22]  # 逆序读取列，时间顺序
         print(f'the shape of feature is {feat.shape}')
         label = df.iloc[:, 0].values
 
@@ -121,6 +110,7 @@ class TimeSeriesDataset(Dataset):
 
     def __getitem__(self, index):
         return self.x[index], self.y[index]
+
 
 # 定义一个函数以提取降维后的特征向量
 def extract_features(model, dataloader):
@@ -134,20 +124,21 @@ def extract_features(model, dataloader):
 if __name__ == "__main__":
     print(device)
     # 加载数据集
-    dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\岷山四调样本点.csv')
+    dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI.csv')
     trainset, testset = train_test_split(dataset, test_size=0.3, random_state=42)
     train_loader = DataLoader(trainset, batch_size=20, shuffle=True)
     test_loader = DataLoader(testset, batch_size=20, shuffle=True)
 
     # 训练模型
-    model = LSTMEncoder(input_size=70, lstm_hidden_size=70, lstm_hidden_size2=70, layer_dim=2, output_dim=2).to(device)  # d_model=20,
+    model = TransformerLSTMEncoder(input_size=21, nhead=3, lstm_input_size=1, num_layers=2, lstm_hidden_size=54,
+                                   lstm_hidden_size2=10, layer_dim=2, output_dim=2).to(device)  # d_model=20,
     # input_size = 70, nhead = 5, num_layers = 2, lstm_hidden_size = 35,
     # lstm_hidden_size2 = 20, layer_dim = 1, output_dim = 2
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     iter = 0
-    for epoch in range(1000):
+    for epoch in range(10000):
         for i, (wdrvi, labels) in enumerate(train_loader):
             model.train()
             optimizer.zero_grad()
@@ -163,12 +154,12 @@ if __name__ == "__main__":
             #  更新参数
             optimizer.step()
             iter += 1
-            if iter % 100 == 0:
+            if (iter-1) % 10 == 0:
                 model.eval()
                 correct = 0
                 total = 0
                 for wdrvi, labels in test_loader:
-                    outputs, out_of_lstm = model(wdrvi)
+                    outputs, _  = model(wdrvi)
                     # print(outputs)
                     predict = torch.max(outputs, 1)[1]
                     # print(predict)
@@ -192,3 +183,7 @@ if __name__ == "__main__":
     plt.ylabel('Accuracy')
     plt.show()
 
+    # 提取整个数据集的降维特征向量
+    # features = extract_features(model, test_loader)
+    PATH = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\model_wdrvi_seq21.pt'
+    torch.save(model, PATH)

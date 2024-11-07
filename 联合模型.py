@@ -10,6 +10,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 import seaborn as sns
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
 import math
 
 bidirectional_set = True
@@ -19,10 +21,6 @@ loss_list = []
 accuracy_list = []
 iteration_list = []
 
-
-import torch
-import torch.nn as nn
-import math
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=21):
@@ -68,7 +66,7 @@ class TransformerLSTMEncoder(nn.Module):
         # 使用Transformer编码器对数据信息进行提取
         x = self.pos_encoder(x.unsqueeze(0))
         x = self.transformer_encoder(x)
-        x = x.permute(1, 2, 0)
+        x = x.permute(1, 0, 2)
 
         # 初始化隐层状态全为0
         h1 = torch.zeros(self.layer_dim * bidirectional, x.size(0), self.hidden_dim1).requires_grad_().to(device)
@@ -142,9 +140,9 @@ if __name__ == "__main__":
     wdrvi_params = {
         'input_size': 21,
         'nhead': 3,
-        'lstm_input_size': 1,
+        'lstm_input_size': 21,
         'num_layers': 2,
-        'lstm_hidden_size': 42,
+        'lstm_hidden_size': 54,
         'lstm_hidden_size2': 10,
         'layer_dim': 2
     }
@@ -152,9 +150,9 @@ if __name__ == "__main__":
     nmdi_params = {
         'input_size': 21,
         'nhead': 3,
-        'lstm_input_size': 1,
+        'lstm_input_size': 21,
         'num_layers': 2,
-        'lstm_hidden_size': 42,
+        'lstm_hidden_size': 54,
         'lstm_hidden_size2': 10,
         'layer_dim': 2
     }
@@ -220,5 +218,5 @@ if __name__ == "__main__":
     plt.show()
 
     # 保存模型
-    PATH = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\combined_model.pt'
+    PATH = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\combined_model_seq1.pt'
     torch.save(model, PATH)
