@@ -2,7 +2,7 @@ import torch
 from sklearn.metrics import f1_score
 import os
 from torch import nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, random_split
 from torch.utils.data import DataLoader
 from osgeo import gdal
 from osgeo import osr
@@ -46,11 +46,12 @@ class PositionalEncoding(nn.Module):
 
 # 定义Transformer编码器和LSTM压缩器
 class TransformerLSTMEncoder(nn.Module):
-    def __init__(self, input_size, nhead, lstm_input_size, num_layers, lstm_hidden_size, lstm_hidden_size2, layer_dim, output_dim):
+    def __init__(self, input_size, nhead, lstm_input_size, num_layers, lstm_hidden_size, lstm_hidden_size2, lstm_hidden_size3,layer_dim, output_dim):
         super(TransformerLSTMEncoder, self).__init__()
         self.layer_dim = layer_dim
         self.hidden_dim1 = lstm_hidden_size
         self.hidden_dim2 = lstm_hidden_size2
+        self.hidden_dim3 = lstm_hidden_size3
 
         # 位置编码
         self.pos_encoder = PositionalEncoding(input_size)
@@ -60,10 +61,16 @@ class TransformerLSTMEncoder(nn.Module):
             nn.TransformerEncoderLayer(d_model=input_size, nhead=nhead), num_layers=num_layers)
         self.lstm = nn.LSTM(lstm_input_size, lstm_hidden_size, layer_dim, batch_first=True,
                             bidirectional=bidirectional_set)
+
         self.dropout = nn.Dropout(p=0.5)  # dropout训练
         self.lstm2 = nn.LSTM(lstm_hidden_size * bidirectional, lstm_hidden_size2, layer_dim, batch_first=True,
                              bidirectional=bidirectional_set)
-        self.fc = nn.Linear(lstm_hidden_size2 * bidirectional, output_dim)
+        self.dropout = nn.Dropout(p=0.5)  # dropout训练
+
+        self.lstm3 = nn.LSTM(lstm_hidden_size2 * bidirectional, lstm_hidden_size3, layer_dim, batch_first=True,
+                             bidirectional=bidirectional_set)
+
+        self.fc = nn.Linear(lstm_hidden_size3 * bidirectional, output_dim)
 
     def forward(self, x):
         # 使用Transformer编码器对数据信息进行提取
@@ -83,9 +90,15 @@ class TransformerLSTMEncoder(nn.Module):
         c2 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim2).requires_grad_().to(device)
         # 分离隐藏状态，避免梯度爆炸
         out_lstm2, (hn, cn) = self.lstm2(out, (h2.detach(), c2.detach()))  # 将输入数据和初始化隐层、记忆单元信息传入
-        out = self.fc(out_lstm2)
 
-        return out[:, -1, :], out_lstm2
+        h3 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim3).requires_grad_().to(device)
+        c3 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim3).requires_grad_().to(device)
+        # 分离隐藏状态，避免梯度爆炸
+        out_lstm3, (hn, cn) = self.lstm3(out_lstm2, (h3.detach(), c3.detach()))  # 将输入数据和初始化隐层、记忆单元信息传入
+
+        out = self.fc(out_lstm3)
+
+        return out.squeeze(1) , out_lstm3
 
 
 # 定义数据集
@@ -98,9 +111,11 @@ class TimeSeriesDataset(Dataset):
             encoding='utf-8',
             dtype={'label': np.int32}
         )
-        feat = df.iloc[:, :].values[:, 1:22]  # 逆序读取列，时间顺序
+        sorted_columns = sorted(df.columns)
+        df = df[sorted_columns]
+        feat = df.iloc[:, :].values[:, 0:24]  # 逆序读取列，时间顺序
         print(f'the shape of feature is {feat.shape}')
-        label = df.iloc[:, 0].values
+        label = df['label'].values
 
         self.x = torch.from_numpy(feat).float().to(device)
         self.y = torch.from_numpy(label).float().to(device)
@@ -124,66 +139,180 @@ def extract_features(model, dataloader):
 if __name__ == "__main__":
     print(device)
     # 加载数据集
-    dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI.csv')
-    trainset, testset = train_test_split(dataset, test_size=0.3, random_state=42)
-    train_loader = DataLoader(trainset, batch_size=20, shuffle=True)
-    test_loader = DataLoader(testset, batch_size=20, shuffle=True)
+    dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')
+    dataset_size = len(dataset)
+    train_size = int(0.7 * dataset_size)
+    val_size = int(0.2 * dataset_size)
+    test_size = dataset_size - train_size - val_size
+
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
     # 训练模型
-    model = TransformerLSTMEncoder(input_size=21, nhead=3, lstm_input_size=21, num_layers=2, lstm_hidden_size=54,
-                                   lstm_hidden_size2=10, layer_dim=2, output_dim=2).to(device)  # d_model=20,
-    # input_size = 70, nhead = 5, num_layers = 2, lstm_hidden_size = 35,
-    # lstm_hidden_size2 = 20, layer_dim = 1, output_dim = 2
+    model = TransformerLSTMEncoder(input_size=24, nhead=8, lstm_input_size=24, num_layers=3, lstm_hidden_size=128,
+                                   lstm_hidden_size2=64, lstm_hidden_size3=16, layer_dim=2, output_dim=2).to(device)  # d_model=20,
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, cooldown=10, verbose=True)
 
+    num_epochs = 1000
+    early_stop_patience = 200
+    best_val_loss = np.inf
+    epochs_no_improve = 0
     iter = 0
-    for epoch in range(10000):
+    loss_list, accuracy_list, iteration_list = [], [], []
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+
         for i, (wdrvi, labels) in enumerate(train_loader):
-            model.train()
+            wdrvi, labels = wdrvi.to(device), labels.to(device)
             optimizer.zero_grad()
-            labels = labels.to(device)
-            # 梯度清零
-            optimizer.zero_grad()
-            #  前向传播
             outputs, _ = model(wdrvi)
-            #  计算损失
             loss = criterion(outputs, labels.long())
-            #  反向传播
             loss.backward()
-            #  更新参数
             optimizer.step()
-            iter += 1
-            if (iter-1) % 10 == 0:
-                model.eval()
-                correct = 0
-                total = 0
-                for wdrvi, labels in test_loader:
-                    outputs, _  = model(wdrvi)
-                    # print(outputs)
-                    predict = torch.max(outputs, 1)[1]
-                    # print(predict)
-                    total += labels.size(0)
-                    correct += (predict == labels.to(device)).sum()
-                    loss_test = criterion(outputs, labels.long())
+            running_loss += loss.item()
 
-                accrucy = correct / total
-                loss_list.append(loss_test.data.cpu())
-                accracy_list.append(accrucy.cpu())
-                iteration_list.append(iter)
+        # 计算训练集平均 loss
+        avg_train_loss = running_loss / len(train_loader)
 
-                print('loop:{} Loss:{} Accuracy:{}'.format(iter, loss.item(), accrucy))
-    plt.plot(iteration_list, loss_list)
-    plt.xlabel('Number of Iteraion')
-    plt.ylabel('Loss')
+        # 验证阶段
+        model.eval()
+        correct = 0
+        total = 0
+        val_loss = 0.0
+
+        with torch.no_grad():
+            for wdrvi, labels in val_loader:
+                wdrvi, labels = wdrvi.to(device), labels.to(device)
+                outputs, _ = model(wdrvi)
+                loss = criterion(outputs, labels.long())
+                val_loss += loss.item()
+                preds = torch.max(outputs, 1)[1]
+                total += labels.size(0)
+                correct += (preds == labels).sum().item()
+
+        avg_val_loss = val_loss / len(val_loader)
+        accuracy = correct / total
+
+        iter += 1
+        loss_list.append(avg_val_loss)
+        accuracy_list.append(accuracy)
+        iteration_list.append(iter)
+
+        print(
+            f'Epoch {epoch + 1}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Accuracy: {accuracy:.4f}')
+
+        # 调整学习率
+        scheduler.step(avg_val_loss)
+
+        # Early stopping
+        # if avg_val_loss < best_val_loss:
+        #     best_val_loss = avg_val_loss
+        #     epochs_no_improve = 0
+        #     torch.save(model.state_dict(), r'E:\\model_wdrvi_input21_seq1_lstm16_batch200_merge方案5.pt')  # 保存最好模型
+        # else:
+        #     epochs_no_improve += 1
+        #     if epochs_no_improve >= early_stop_patience:
+        #         print('Early stopping triggered!')
+        #         break
+    torch.save(model, r'E:\\model_wdrvi_input24_seq1_lstm16_batch200_merge方案5.pt')  # 保存最好模型
+    # 绘制曲线
+    fig, ax1 = plt.subplots()
+
+    # 画 loss 曲线（左 y 轴）
+    color = 'tab:red'
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Validation Loss', color=color)
+    ax1.plot(iteration_list, loss_list, color=color, label='Validation Loss')
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    # 创建第二个 y 轴，共享 x 轴
+    ax2 = ax1.twinx()
+    color = 'tab:blue'
+    ax2.set_ylabel('Validation Accuracy', color=color)
+    ax2.plot(iteration_list, accuracy_list, color=color, label='Validation Accuracy')
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    # 添加标题和图例
+    plt.title('Loss and Accuracy over Epochs')
     plt.show()
+    model.eval()
+    correct = 0
+    total = 0
 
-    plt.plot(iteration_list, accracy_list)
-    plt.xlabel('Number of Iteraion')
-    plt.ylabel('Accuracy')
-    plt.show()
+    with torch.no_grad():
+        for wdrvi, labels in test_loader:
+            wdrvi, labels = wdrvi.to(device), labels.to(device)
+            outputs, _ = model(wdrvi)
+            preds = torch.max(outputs, 1)[1]
+            total += labels.size(0)
+            correct += (preds == labels).sum().item()
 
-    # 提取整个数据集的降维特征向量
-    # features = extract_features(model, test_loader)
-    PATH = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\model_wdrvi_seq1.pt'
-    torch.save(model, PATH)
+    test_accuracy = correct / total
+    print(f'\nFinal Test Accuracy: {test_accuracy:.4f}')
+    # model = TransformerLSTMEncoder(input_size=24, nhead=8, lstm_input_size=24, num_layers=3, lstm_hidden_size=128,
+    #                                lstm_hidden_size2=64, lstm_hidden_size3=16, layer_dim=2, output_dim=2).to(
+    #     device)  # d_model=20,
+    #
+    # criterion = nn.CrossEntropyLoss()
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    #
+    # iter = 0
+    # for epoch in range(10000):
+    #     for i, (wdrvi, labels) in enumerate(train_loader):
+    #         model.train()
+    #         optimizer.zero_grad()
+    #         labels = labels.to(device)
+    #         # 梯度清零
+    #         optimizer.zero_grad()
+    #         #  前向传播
+    #         outputs, _ = model(wdrvi)
+    #         #  计算损失
+    #         loss = criterion(outputs, labels.long())
+    #         #  反向传播
+    #         loss.backward()
+    #         #  更新参数
+    #         optimizer.step()
+    #         iter += 1
+    #         if (iter - 1) % 10 == 0:
+    #             model.eval()
+    #             correct = 0
+    #             total = 0
+    #             for wdrvi, labels in val_loader:
+    #                 outputs, _ = model(wdrvi)
+    #                 # print(outputs)
+    #                 predict = torch.max(outputs, 1)[1]
+    #                 # print(predict)
+    #                 total += labels.size(0)
+    #                 correct += (predict == labels.to(device)).sum()
+    #                 loss_test = criterion(outputs, labels.long())
+    #
+    #             accrucy = correct / total
+    #             loss_list.append(loss_test.data.cpu())
+    #             accracy_list.append(accrucy.cpu())
+    #             iteration_list.append(iter)
+    #
+    #             print('loop:{} Loss:{} Accuracy:{}'.format(iter, loss.item(), accrucy))
+    # # 绘制曲线
+    # fig, ax1 = plt.subplots()
+    # # 画 loss 曲线（左 y 轴）
+    # color = 'tab:red'
+    # ax1.set_xlabel('Epoch')
+    # ax1.set_ylabel('Validation Loss', color=color)
+    # ax1.plot(iteration_list, loss_list, color=color, label='Validation Loss')
+    # ax1.tick_params(axis='y', labelcolor=color)
+    # # 创建第二个 y 轴，共享 x 轴
+    # ax2 = ax1.twinx()
+    # color = 'tab:blue'
+    # ax2.set_ylabel('Validation Accuracy', color=color)
+    # ax2.plot(iteration_list, accracy_list, color=color, label='Validation Accuracy')
+    # ax2.tick_params(axis='y', labelcolor=color)
+    # # 添加标题和图例
+    # plt.title('Loss and Accuracy over Epochs')
+    # plt.show()
+    # torch.save(model.state_dict(), r'E:\\best_model.pt')

@@ -13,10 +13,13 @@ from sklearn.metrics import accuracy_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from xgboost.sklearn import XGBClassifier
+from xgboost.sklearn import XGBRegressor
 import seaborn as sns
 import matplotlib.pyplot as plt
 import datetime
 import math
+import shap
+from scipy.stats import gaussian_kde
 from tqdm import tqdm
 
 bidirectional_set = True
@@ -25,6 +28,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 loss_list = []
 accuracy_list = []
 iteration_list = []
+
 
 
 class PositionalEncoding(nn.Module):
@@ -48,11 +52,12 @@ class PositionalEncoding(nn.Module):
 
 # 定义Transformer编码器和LSTM压缩器
 class TransformerLSTMEncoder(nn.Module):
-    def __init__(self, input_size, nhead, lstm_input_size, num_layers, lstm_hidden_size, lstm_hidden_size2, layer_dim, output_dim):
+    def __init__(self, input_size, nhead, lstm_input_size, num_layers, lstm_hidden_size, lstm_hidden_size2, lstm_hidden_size3,layer_dim, output_dim):
         super(TransformerLSTMEncoder, self).__init__()
         self.layer_dim = layer_dim
         self.hidden_dim1 = lstm_hidden_size
         self.hidden_dim2 = lstm_hidden_size2
+        self.hidden_dim3 = lstm_hidden_size3
 
         # 位置编码
         self.pos_encoder = PositionalEncoding(input_size)
@@ -62,10 +67,16 @@ class TransformerLSTMEncoder(nn.Module):
             nn.TransformerEncoderLayer(d_model=input_size, nhead=nhead), num_layers=num_layers)
         self.lstm = nn.LSTM(lstm_input_size, lstm_hidden_size, layer_dim, batch_first=True,
                             bidirectional=bidirectional_set)
+
         self.dropout = nn.Dropout(p=0.5)  # dropout训练
         self.lstm2 = nn.LSTM(lstm_hidden_size * bidirectional, lstm_hidden_size2, layer_dim, batch_first=True,
                              bidirectional=bidirectional_set)
-        self.fc = nn.Linear(lstm_hidden_size2 * bidirectional, output_dim)
+        self.dropout = nn.Dropout(p=0.5)  # dropout训练
+
+        self.lstm3 = nn.LSTM(lstm_hidden_size2 * bidirectional, lstm_hidden_size3, layer_dim, batch_first=True,
+                             bidirectional=bidirectional_set)
+
+        self.fc = nn.Linear(lstm_hidden_size3 * bidirectional, output_dim)
 
     def forward(self, x):
         # 使用Transformer编码器对数据信息进行提取
@@ -85,16 +96,22 @@ class TransformerLSTMEncoder(nn.Module):
         c2 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim2).requires_grad_().to(device)
         # 分离隐藏状态，避免梯度爆炸
         out_lstm2, (hn, cn) = self.lstm2(out, (h2.detach(), c2.detach()))  # 将输入数据和初始化隐层、记忆单元信息传入
-        out = self.fc(out_lstm2)
 
-        return out[:, -1, :], out_lstm2
+        h3 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim3).requires_grad_().to(device)
+        c3 = torch.zeros(self.layer_dim * bidirectional, out.size(0), self.hidden_dim3).requires_grad_().to(device)
+        # 分离隐藏状态，避免梯度爆炸
+        out_lstm3, (hn, cn) = self.lstm3(out_lstm2, (h3.detach(), c3.detach()))  # 将输入数据和初始化隐层、记忆单元信息传入
+
+        out = self.fc(out_lstm3)
+
+        return out.squeeze(1) , out_lstm3
 
 
 class TIFDataSet(Dataset):
     def __init__(self, filepath_wdrvi):
 
         self.WdrviNameList = os.listdir(filepath_wdrvi)
-        self.wdrvi_all = np.zeros((6203 * 6273, 21))
+        self.wdrvi_all = np.zeros((6203 * 6273, 24))
 
         m = 0
         for i in range(len(self.WdrviNameList)):
@@ -105,6 +122,9 @@ class TIFDataSet(Dataset):
                 rows = rds.RasterYSize
                 band = rds.GetRasterBand(1)
                 data = band.ReadAsArray(0, 0, cols, rows)
+                nodata = data[0, 0]
+                np.nan_to_num(data, nan=-9, copy=False)
+                data = np.where(data == nodata, -9, data)
                 data = data.reshape(-1, 1)
                 self.wdrvi_all[:, m] = data[:, 0]
                 m += 1
@@ -117,6 +137,52 @@ class TIFDataSet(Dataset):
     def __getitem__(self, index):
         return self.wdrvi[index]
 
+class TIFDataSet2(Dataset):
+    def __init__(self, file_dir, block_size=400):
+        self.file_dir = file_dir
+        self.block_size = block_size
+        # 筛选tif文件列表
+        self.tif_files = [f for f in os.listdir(file_dir) if f.lower().endswith(('.tif', '.tiff'))]
+        # 预读取元数据
+        sample_file = os.path.join(self.file_dir,self.tif_files[0])
+        ds = gdal.Open(sample_file)
+        self.width = ds.RasterXSize
+        self.height = ds.RasterYSize
+        self.num_bands = len(self.tif_files)
+        ds = None
+        # 计算分块索引
+        self.blocks = []
+        for y in range(0, self.height, self.block_size):
+            for x in range(0, self.width, self.block_size):
+                block_width = min(self.block_size, self.width - x)
+                block_height = min(self.block_size, self.height - y)
+                self.blocks.append((x, y, block_width, block_height))
+
+    def __len__(self):
+        return len(self.blocks)
+
+    def __getitem__(self, idx):
+        x, y, bw, bh = self.blocks[idx]
+
+        # 动态读取所有波段数据
+        block_data = []
+        for filename in sorted(self.tif_files):
+            filepath = os.path.join(self.file_dir, filename)
+            ds = gdal.Open(filepath)
+            band = ds.GetRasterBand(1)
+            data = band.ReadAsArray(x, y, bw, bh).astype(np.float32)
+            block_data.append(data.reshape(-1, 1))
+            ds = None
+        combined = np.concatenate(block_data,axis=1)
+        del block_data
+        tensor = torch.from_numpy(combined).float().to('cuda')
+        return tensor
+
+def collate_fn(batch):
+    tensors = [torch.tensor(sample) for sample in batch]
+    return tensors
+
+
 class ADDDataSet(Dataset):
     def __init__(self, filrpath):
         rds = gdal.Open(filrpath)
@@ -127,7 +193,7 @@ class ADDDataSet(Dataset):
         self.band = rds.GetRasterBand(1)
         self.data = self.band.ReadAsArray(0, 0, self.cols, self.rows)
         self.data = self.data.reshape(-1, 1)
-        self.x = torch.from_numpy(self.data.astype("int32")).to('cpu')
+        self.x = torch.from_numpy(self.data).to('cpu')
         del self.data
         # self.y = torch.from_numpy(label)
 
@@ -136,6 +202,36 @@ class ADDDataSet(Dataset):
 
     def __getitem__(self, index):
         return self.x[index]
+
+
+class ADDDataSet2(Dataset):
+    def __init__(self, filepath, block_size=400):
+        self.filepath = filepath
+        self.rds = gdal.Open(filepath)
+        self.geotransform = self.rds.GetGeoTransform()
+        self.projection = self.rds.GetProjectionRef()
+        self.cols = self.rds.RasterXSize
+        self.rows = self.rds.RasterYSize
+        self.block_size = block_size
+        self.blocks = []
+        for y in range(0, self.rows, self.block_size):
+            for x in range(0, self.cols, self.block_size):
+                bw = min(self.block_size, self.cols - x)
+                bh = min(self.block_size, self.rows - y)
+                self.blocks.append((x, y, bw, bh))
+        self.rds = None
+
+    def __len__(self):
+        return len(self.blocks)
+
+    def __getitem__(self, idx):
+        x, y, bw, bh = self.blocks[idx]
+        ds = gdal.Open(self.filepath)
+        band = ds.GetRasterBand(1)
+        data = band.ReadAsArray(x, y, bw, bh).astype(np.float32)
+        tensor = torch.from_numpy(data.reshape(-1, 1)).to('cuda')
+        ds = None
+        return tensor
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, filepath):
@@ -146,9 +242,11 @@ class TimeSeriesDataset(Dataset):
             encoding='utf-8',
             dtype={'label': np.int32}
         )
-        feat = df.iloc[:, :].values[:, 1:22]  # 逆序读取列，时间顺序
+        sorted_columns = sorted(df.columns)
+        df = df[sorted_columns]
+        feat = df.iloc[:, :].values[:, 0:24]  # 逆序读取列，时间顺序
         print(f'the shape of feature is {feat.shape}')
-        label = df.iloc[:, 0].values
+        label = df['label'].values
 
         self.x = torch.from_numpy(feat).float().to(device)
         self.y = torch.from_numpy(label).float().to(device)
@@ -159,34 +257,29 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, index):
         return self.x[index], self.y[index]
 
-# 定义一个函数以提取降维后的特征向量
-def extract_features(model, dataloader):
-    with torch.no_grad():
-        for wdrvi, _ in dataloader:
-            # 将整个序列输入到Transformer编码器和LSTM压缩器中，得到降维后的特征向量
-            _, features = model(wdrvi)
-            return features.cpu().numpy()
+
 
 
 if __name__ == '__main__':
     starttime = datetime.datetime.now()
-    lstm_feat = np.zeros((1, 20))  # 第二层的输出大小*是否双向lstm
-    lstm_feat_4train = np.zeros((1, 20))
-    probability_Y = []
 
-    tifset = TIFDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\植被指数序列\WDRVI")
-    pre_loader = DataLoader(tifset, batch_size=200, shuffle=False)
+    lstm_feat_4train = np.zeros((1, 32))# 第三层的输出大小
+    tifset = TIFDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\植被指数序列\new_wdrvi")
+    pre_loader = DataLoader(tifset, batch_size=20, shuffle=False)
 
-    demset = ADDDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm0921re.tif")
-    dem_loader = DataLoader(demset, batch_size=200, shuffle=False)
+    demset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
+    dem_loader = DataLoader(demset, batch_size=20, shuffle=False)
 
-    csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI.csv')
+    wsciset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\vsc\wsci_re.tif")
+    wsci_loader = DataLoader(wsciset, batch_size=20, shuffle=False)
+
+    csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')  #WDRVI_sample_merge方案3new_wdrvi
     train_loader = DataLoader(csvset, batch_size=20, shuffle=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = torch.load(
-        r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\model_wdrvi_21.pt')
+        r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\model_wdrvi_input24_seq1_lstm16_batch200_merge方案5.pt')
     model.to(device)
     model.eval()
 
@@ -195,23 +288,30 @@ if __name__ == '__main__':
         lstm_feat_4train = np.append(lstm_feat_4train, out_of_lstm.view(out_of_lstm.size(0), -1).cpu().detach().numpy(),0)
     lstm_feat_4train = np.delete(lstm_feat_4train, 0, 0)
     print("--------用于训练xgb的wdrvi数据经transformer和LSTM结束----------")
+    # pd.DataFrame(lstm_feat_4train).to_csv('E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\lstm_4_train_inputsize21_more.csv')
 
-    df_4train = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI.csv', header=0, index_col=0,
+    df_4train = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv', header=0, index_col=0,
                             encoding='utf-8')
-    dem_4train = df_4train.iloc[:, -1].values
-    dem_4train = dem_4train.reshape(-1, 1)
+    dem_4train = df_4train.iloc[:, -2:].values.reshape(-1, 2)
+    # wsci_4train = df_4train.iloc[:, -1].values.reshape(-1, 1)
     label_4train = df_4train.iloc[:, 0].values
     lstm_feat_4train = np.append(lstm_feat_4train, dem_4train, 1)
     print("--------用于训练xgb的数据准备结束（补充dem在最后一列）----------")
+    cols_feature = ['feature{}'.format(i) for i in range(32)]
+    cols_feature = cols_feature + ['chm', 'wsci']
+    # cols_feature2 = ['SAR{}'.format(i) for i in range(38)]
+    # cols_feature = cols_feature + cols_feature2
+    lstm_feat_4train = pd.DataFrame(lstm_feat_4train, columns=cols_feature)
 
     """-----------开始构建xgb模型------------------"""
     X_train, X_test, y_train, y_test = train_test_split(lstm_feat_4train, label_4train, test_size=0.3, random_state=5,
                                                         shuffle=True)
-    params = {'objective': 'reg:logistic', 'booster': 'gbtree', 'max_depth': 3, 'silent': 1}
-    clf = XGBClassifier(seed=1024, learning_rate=0.1,max_depth=9, min_child_weight=1, gamma=0,
-                        subsample=0.9, colsample_bytree=1, alpha=0.06, reg_lambda=1)
-    """ max_depth=9, min_child_weight=1, gamma=0,
-                        subsample=0.9, colsample_bytree=1, alpha=0.06, reg_lambda=1"""
+    clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1,
+                        )
+
+    # 方案3  max_depth=2,min_child_weight=0.97,gamma=0.38,subsample=0.16,colsample_bytree=0.89,alpha=0.0,reg_lambda=0.11,n_estimators=106
+    # new: max_depth=1,min_child_weight=3,gamma=0.88,subsample=0.12,colsample_bytree=0.21,alpha=0.0,reg_lambda=0.75,n_estimators=200
+    # 方案4::::max_depth=1,min_child_weight=2,gamma=0,subsample=0.97,colsample_bytree=0.71,alpha=0.19,reg_lambda=0.27,n_estimators=51
     clf.fit(X_train, y_train)
     test_predict = clf.predict(X_test)
 
@@ -232,6 +332,18 @@ if __name__ == '__main__':
     plt.xlabel('Predicted labels')
     plt.ylabel('True labels')
     plt.show()
+
+
+
+    explainer = shap.TreeExplainer(clf, X_train, feature_perturbation="interventional", model_output='probability')
+    shap_values = explainer.shap_values(lstm_feat_4train[cols_feature])
+    shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], max_display=16)
+    shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], plot_type="bar")
+    shap.dependence_plot('chm', shap_values, lstm_feat_4train, interaction_index=None, show=True)
+    shap.dependence_plot('wsci', shap_values, lstm_feat_4train, interaction_index=None, show=True)
+
+
+
     """-----------xgb模型训练结束------------------"""
 
     probability_Y = np.zeros((demset.rows, demset.cols))
@@ -239,21 +351,25 @@ if __name__ == '__main__':
     # 提取特征并进行预测
     lstm_features = []
     dem_features = []
+    wsci_features = []
 
     # 收集所有批次的特征
-    for wdrvi, dem in zip(pre_loader, dem_loader):
+    for wdrvi, dem, wsci in zip(pre_loader, dem_loader, wsci_loader):
         _, out_of_lstm = model(wdrvi.to(device))
         out_of_lstm = out_of_lstm.cpu().detach().numpy()
         dem = dem.cpu().detach().numpy()
         lstm_features.append(out_of_lstm)
         dem_features.append(dem)
+        wsci_features.append(wsci)
 
     # 合并所有批次的特征
     lstm_features = np.concatenate(lstm_features, axis=0)
     dem_features = np.concatenate(dem_features, axis=0)
+    wsci_features = np.concatenate(wsci_features, axis=0)
+
 
     # 将DEM特征添加到LSTM特征的最后一列
-    combined_features = np.concatenate((lstm_features, dem_features[:, None]), axis=2)
+    combined_features = np.concatenate((lstm_features, dem_features[:, None], wsci_features[:, None]), axis=2)
 
     # 预测概率
     probabilities = clf.predict_proba(combined_features.reshape(-1, combined_features.shape[2]))[:, 1]
@@ -267,7 +383,7 @@ if __name__ == '__main__':
     geotransform = demset.geotransform
     projection = demset.projection
     driver = gdal.GetDriverByName('GTiff')
-    dst_filename = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\竹子概率_transfomer_lstm_xgb0921_onlywdrvi.tif'
+    dst_filename = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\bamboo_inputsize24_seq1_lstm4_batch200_more_merge方案5_xgb默认参数.tif'
     dst_ds = driver.Create(dst_filename, demset.cols, demset.rows, 1, gdal.GDT_Float64)
     dst_ds.SetGeoTransform(list(geotransform))
     srs = osr.SpatialReference()
