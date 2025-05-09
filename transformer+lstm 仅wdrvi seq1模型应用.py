@@ -137,51 +137,6 @@ class TIFDataSet(Dataset):
     def __getitem__(self, index):
         return self.wdrvi[index]
 
-class TIFDataSet2(Dataset):
-    def __init__(self, file_dir, block_size=400):
-        self.file_dir = file_dir
-        self.block_size = block_size
-        # 筛选tif文件列表
-        self.tif_files = [f for f in os.listdir(file_dir) if f.lower().endswith(('.tif', '.tiff'))]
-        # 预读取元数据
-        sample_file = os.path.join(self.file_dir,self.tif_files[0])
-        ds = gdal.Open(sample_file)
-        self.width = ds.RasterXSize
-        self.height = ds.RasterYSize
-        self.num_bands = len(self.tif_files)
-        ds = None
-        # 计算分块索引
-        self.blocks = []
-        for y in range(0, self.height, self.block_size):
-            for x in range(0, self.width, self.block_size):
-                block_width = min(self.block_size, self.width - x)
-                block_height = min(self.block_size, self.height - y)
-                self.blocks.append((x, y, block_width, block_height))
-
-    def __len__(self):
-        return len(self.blocks)
-
-    def __getitem__(self, idx):
-        x, y, bw, bh = self.blocks[idx]
-
-        # 动态读取所有波段数据
-        block_data = []
-        for filename in sorted(self.tif_files):
-            filepath = os.path.join(self.file_dir, filename)
-            ds = gdal.Open(filepath)
-            band = ds.GetRasterBand(1)
-            data = band.ReadAsArray(x, y, bw, bh).astype(np.float32)
-            block_data.append(data.reshape(-1, 1))
-            ds = None
-        combined = np.concatenate(block_data,axis=1)
-        del block_data
-        tensor = torch.from_numpy(combined).float().to('cuda')
-        return tensor
-
-def collate_fn(batch):
-    tensors = [torch.tensor(sample) for sample in batch]
-    return tensors
-
 
 class ADDDataSet(Dataset):
     def __init__(self, filrpath):
@@ -202,36 +157,6 @@ class ADDDataSet(Dataset):
 
     def __getitem__(self, index):
         return self.x[index]
-
-
-class ADDDataSet2(Dataset):
-    def __init__(self, filepath, block_size=400):
-        self.filepath = filepath
-        self.rds = gdal.Open(filepath)
-        self.geotransform = self.rds.GetGeoTransform()
-        self.projection = self.rds.GetProjectionRef()
-        self.cols = self.rds.RasterXSize
-        self.rows = self.rds.RasterYSize
-        self.block_size = block_size
-        self.blocks = []
-        for y in range(0, self.rows, self.block_size):
-            for x in range(0, self.cols, self.block_size):
-                bw = min(self.block_size, self.cols - x)
-                bh = min(self.block_size, self.rows - y)
-                self.blocks.append((x, y, bw, bh))
-        self.rds = None
-
-    def __len__(self):
-        return len(self.blocks)
-
-    def __getitem__(self, idx):
-        x, y, bw, bh = self.blocks[idx]
-        ds = gdal.Open(self.filepath)
-        band = ds.GetRasterBand(1)
-        data = band.ReadAsArray(x, y, bw, bh).astype(np.float32)
-        tensor = torch.from_numpy(data.reshape(-1, 1)).to('cuda')
-        ds = None
-        return tensor
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, filepath):
@@ -264,13 +189,13 @@ if __name__ == '__main__':
     starttime = datetime.datetime.now()
 
     lstm_feat_4train = np.zeros((1, 32))# 第三层的输出大小
-    tifset = TIFDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\植被指数序列\new_wdrvi")
+    tifset = TIFDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\植被指数序列\new_wdrvi")
     pre_loader = DataLoader(tifset, batch_size=20, shuffle=False)
 
-    demset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
+    demset = ADDDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
     dem_loader = DataLoader(demset, batch_size=20, shuffle=False)
 
-    wsciset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\vsc\wsci_re.tif")
+    wsciset = ADDDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\vsc\wsci_re.tif")
     wsci_loader = DataLoader(wsciset, batch_size=20, shuffle=False)
 
     csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')  #WDRVI_sample_merge方案3new_wdrvi
@@ -307,7 +232,7 @@ if __name__ == '__main__':
     X_train, X_test, y_train, y_test = train_test_split(lstm_feat_4train, label_4train, test_size=0.3, random_state=5,
                                                         shuffle=True)
     clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1,
-                        )
+                        max_depth=6, min_child_weight=6,gamma=0.14,colsample_bytree=0.97,subsample=0.67,)
 
     # 方案3  max_depth=2,min_child_weight=0.97,gamma=0.38,subsample=0.16,colsample_bytree=0.89,alpha=0.0,reg_lambda=0.11,n_estimators=106
     # new: max_depth=1,min_child_weight=3,gamma=0.88,subsample=0.12,colsample_bytree=0.21,alpha=0.0,reg_lambda=0.75,n_estimators=200
@@ -337,7 +262,7 @@ if __name__ == '__main__':
 
     explainer = shap.TreeExplainer(clf, X_train, feature_perturbation="interventional", model_output='probability')
     shap_values = explainer.shap_values(lstm_feat_4train[cols_feature])
-    shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], max_display=16)
+    shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], max_display=12)
     shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], plot_type="bar")
     shap.dependence_plot('chm', shap_values, lstm_feat_4train, interaction_index=None, show=True)
     shap.dependence_plot('wsci', shap_values, lstm_feat_4train, interaction_index=None, show=True)
