@@ -106,57 +106,125 @@ class TransformerLSTMEncoder(nn.Module):
 
         return out.squeeze(1) , out_lstm3
 
+class TIFDataSet2(torch.utils.data.Dataset):
+    def __init__(self, file_dir, block_size=400):
+        self.file_dir = file_dir
+        self.block_size = block_size
+        self.tif_files = [f for f in os.listdir(file_dir) if f.lower().endswith(('.tif', '.tiff'))]
+        # self.tif_files.sort()
+        self.datasets = []
+        for filename in self.tif_files:
+            filepath = os.path.join(self.file_dir, filename)
+            ds = gdal.Open(filepath)
+            self.datasets.append(ds)
 
-class TIFDataSet(Dataset):
-    def __init__(self, filepath_wdrvi):
+        # 获取基本信息
+        self.width = self.datasets[0].RasterXSize
+        self.height = self.datasets[0].RasterYSize
+        self.num_bands = len(self.datasets)
 
-        self.WdrviNameList = os.listdir(filepath_wdrvi)
-        self.wdrvi_all = np.zeros((6203 * 6273, 24))
-
-        m = 0
-        for i in range(len(self.WdrviNameList)):
-            if (os.path.splitext(self.WdrviNameList[i])[-1] == ".tif"):
-                rds = gdal.Open(filepath_wdrvi + "\\" + self.WdrviNameList[i])
-                print(f'reading{filepath_wdrvi}' + "\\" + self.WdrviNameList[i])
-                cols = rds.RasterXSize
-                rows = rds.RasterYSize
-                band = rds.GetRasterBand(1)
-                data = band.ReadAsArray(0, 0, cols, rows)
-                nodata = data[0, 0]
-                np.nan_to_num(data, nan=-9, copy=False)
-                data = np.where(data == nodata, -9, data)
-                data = data.reshape(-1, 1)
-                self.wdrvi_all[:, m] = data[:, 0]
-                m += 1
-        self.wdrvi = torch.from_numpy(self.wdrvi_all).float().to('cpu')
-        del self.wdrvi_all
-
-    def __len__(self):
-        return self.wdrvi.shape[0]
-
-    def __getitem__(self, index):
-        return self.wdrvi[index]
-
-
-class ADDDataSet(Dataset):
-    def __init__(self, filrpath):
-        rds = gdal.Open(filrpath)
-        self.geotransform = rds.GetGeoTransform()  # geotransform
-        self.projection = rds.GetProjectionRef()  # projection
-        self.cols = rds.RasterXSize
-        self.rows = rds.RasterYSize
-        self.band = rds.GetRasterBand(1)
-        self.data = self.band.ReadAsArray(0, 0, self.cols, self.rows)
-        self.data = self.data.reshape(-1, 1)
-        self.x = torch.from_numpy(self.data).to('cpu')
-        del self.data
-        # self.y = torch.from_numpy(label)
+        # 计算分块索引
+        self.blocks = []
+        for y in range(0, self.height, self.block_size):
+            for x in range(0, self.width, self.block_size):
+                bw = min(self.block_size, self.width - x)
+                bh = min(self.block_size, self.height - y)
+                self.blocks.append((x, y, bw, bh))
 
     def __len__(self):
-        return self.x.shape[0]
+        return len(self.blocks)
 
-    def __getitem__(self, index):
-        return self.x[index]
+    def __getitem__(self, idx):
+        x, y, bw, bh = self.blocks[idx]
+        block_data = []
+        nodata_masks = []
+
+        for ds in self.datasets:
+            band = ds.GetRasterBand(1)
+            nodata = band.GetNoDataValue()
+            data = band.ReadAsArray(x, y, bw, bh).astype(np.float32)
+
+            if nodata is not None:
+                mask = data != nodata
+                nodata_masks.append(mask)
+            data = np.nan_to_num(data, nan=-9)
+            if nodata is not None:
+                data[data == nodata] = -9
+
+            block_data.append(data.reshape(-1, 1))
+
+        combined = np.concatenate(block_data, axis=1)
+        tensor = torch.from_numpy(combined).float()
+        if nodata_masks:
+            valid_mask = np.logical_or.reduce(nodata_masks).reshape(-1)
+        else:
+            valid_mask = np.ones((bw * bh,), dtype=bool)
+
+        return {
+            'tensor': tensor,
+            'x': x,
+            'y': y,
+            'width': bw,
+            'height': bh,
+            'valid_mask': valid_mask
+        }
+
+    def __del__(self):
+        # 确保 Dataset 被销毁时关闭 gdal 资源
+        for ds in self.datasets:
+            ds = None
+
+def no_stack_collate(batch):
+    return batch
+
+class ADDDataSet2(Dataset):
+    def __init__(self, filepath, block_size=400):
+        self.filepath = filepath
+        self.block_size = block_size
+        ds = gdal.Open(filepath)
+        self.geotransform = ds.GetGeoTransform()
+        self.projection = ds.GetProjection()
+        self.cols = ds.RasterXSize
+        self.rows = ds.RasterYSize
+        self.band = 1  # 默认取第1波段
+        nodata = ds.GetRasterBand(1).GetNoDataValue()
+        self.nodata_value = nodata if nodata is not None else -9999
+        ds = None
+
+        # 计算分块
+        self.blocks = []
+        for y in range(0, self.rows, self.block_size):
+            for x in range(0, self.cols, self.block_size):
+                bw = min(self.block_size, self.cols - x)
+                bh = min(self.block_size, self.rows - y)
+                self.blocks.append((x, y, bw, bh))
+
+    def __len__(self):
+        return len(self.blocks)
+
+    def __getitem__(self, idx):
+        x, y, bw, bh = self.blocks[idx]
+        ds = gdal.Open(self.filepath)
+        band = ds.GetRasterBand(self.band)
+        data = band.ReadAsArray(x, y, bw, bh).astype(np.float32)
+        nodata = band.GetNoDataValue()
+        if nodata is not None:
+            valid_mask = data != nodata
+        else:
+            valid_mask = np.ones((bh, bw), dtype=bool)
+        data = np.nan_to_num(data, nan=self.nodata_value)
+        if nodata is not None:
+            data[data == nodata] = self.nodata_value
+        tensor = torch.from_numpy(data.reshape(-1, 1)).float()
+        ds = None
+        return {
+            'tensor': tensor,
+            'x': x,
+            'y': y,
+            'width': bw,
+            'height': bh,
+            'valid_mask': valid_mask.reshape(-1)
+        }
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, filepath):
@@ -188,55 +256,48 @@ class TimeSeriesDataset(Dataset):
 if __name__ == '__main__':
     starttime = datetime.datetime.now()
 
-    lstm_feat_4train = np.zeros((1, 32))# 第三层的输出大小
-    tifset = TIFDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\植被指数序列\new_wdrvi")
-    pre_loader = DataLoader(tifset, batch_size=20, shuffle=False)
+    lstm_feat_4train = np.zeros((1, 32))  # 第三层的输出大小
+    tifset = TIFDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\植被指数序列\new_wdrvi")
+    pre_loader = DataLoader(tifset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
+    #DataLoader的默认：default_collate，会把 batch 里的每个元素拼接成一个大的tensor，这在分块读取栅格的时候会造成报错：每个块的大小不一致
 
-    demset = ADDDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
-    dem_loader = DataLoader(demset, batch_size=20, shuffle=False)
+    demset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
+    dem_loader = DataLoader(demset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
 
-    wsciset = ADDDataSet(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\vsc\wsci_re.tif")
-    wsci_loader = DataLoader(wsciset, batch_size=20, shuffle=False)
+    wsciset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\vsc\wsci_re.tif")
+    wsci_loader = DataLoader(wsciset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
 
-    csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')  #WDRVI_sample_merge方案3new_wdrvi
+    csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')
     train_loader = DataLoader(csvset, batch_size=20, shuffle=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    full_result = np.zeros((tifset.height, tifset.width), dtype=np.float32)
+    count_map = np.zeros((tifset.height, tifset.width), dtype=np.uint8)
 
     model = torch.load(
         r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\model_wdrvi_input24_seq1_lstm16_batch200_merge方案5.pt')
     model.to(device)
     model.eval()
 
-    for wdrvi,_ in train_loader:
-        _, out_of_lstm = model(wdrvi)
-        lstm_feat_4train = np.append(lstm_feat_4train, out_of_lstm.view(out_of_lstm.size(0), -1).cpu().detach().numpy(),0)
+    for wdrvi, _ in train_loader:
+        _, out_of_lstm = model(wdrvi.to(device))
+        lstm_feat_4train = np.append(lstm_feat_4train, out_of_lstm.view(out_of_lstm.size(0), -1).cpu().detach().numpy(), 0)
     lstm_feat_4train = np.delete(lstm_feat_4train, 0, 0)
     print("--------用于训练xgb的wdrvi数据经transformer和LSTM结束----------")
-    # pd.DataFrame(lstm_feat_4train).to_csv('E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\lstm_4_train_inputsize21_more.csv')
 
     df_4train = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv', header=0, index_col=0,
                             encoding='utf-8')
     dem_4train = df_4train.iloc[:, -2:].values.reshape(-1, 2)
-    # wsci_4train = df_4train.iloc[:, -1].values.reshape(-1, 1)
     label_4train = df_4train.iloc[:, 0].values
     lstm_feat_4train = np.append(lstm_feat_4train, dem_4train, 1)
     print("--------用于训练xgb的数据准备结束（补充dem在最后一列）----------")
-    cols_feature = ['feature{}'.format(i) for i in range(32)]
-    cols_feature = cols_feature + ['chm', 'wsci']
-    # cols_feature2 = ['SAR{}'.format(i) for i in range(38)]
-    # cols_feature = cols_feature + cols_feature2
+    cols_feature = ['feature{}'.format(i) for i in range(32)] + ['chm', 'wsci']
     lstm_feat_4train = pd.DataFrame(lstm_feat_4train, columns=cols_feature)
 
     """-----------开始构建xgb模型------------------"""
-    X_train, X_test, y_train, y_test = train_test_split(lstm_feat_4train, label_4train, test_size=0.3, random_state=5,
-                                                        shuffle=True)
+    X_train, X_test, y_train, y_test = train_test_split(lstm_feat_4train, label_4train, test_size=0.3, random_state=5, shuffle=True)
     clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1,
-                        max_depth=6, min_child_weight=6,gamma=0.14,colsample_bytree=0.97,subsample=0.67,)
-
-    # 方案3  max_depth=2,min_child_weight=0.97,gamma=0.38,subsample=0.16,colsample_bytree=0.89,alpha=0.0,reg_lambda=0.11,n_estimators=106
-    # new: max_depth=1,min_child_weight=3,gamma=0.88,subsample=0.12,colsample_bytree=0.21,alpha=0.0,reg_lambda=0.75,n_estimators=200
-    # 方案4::::max_depth=1,min_child_weight=2,gamma=0,subsample=0.97,colsample_bytree=0.71,alpha=0.19,reg_lambda=0.27,n_estimators=51
+                        max_depth=6, min_child_weight=6, gamma=0.14, colsample_bytree=0.97, subsample=0.67)
     clf.fit(X_train, y_train)
     test_predict = clf.predict(X_test)
 
@@ -248,17 +309,13 @@ if __name__ == '__main__':
     print("acc:", accuracy_score(y_test, test_predict))
     print("F1:", f1_score(y_test, test_predict))
 
-    # 查看混淆矩阵 (预测值和真实值的各类情况统计矩阵)
     confusion_matrix_result = metrics.confusion_matrix(test_predict, y_test)
     print('The confusion matrix result:\n', confusion_matrix_result)
-    # 利用热力图对于结果进行可视化
     plt.figure(figsize=(8, 6))
     sns.heatmap(confusion_matrix_result, annot=True, cmap='Blues', fmt='g')
     plt.xlabel('Predicted labels')
     plt.ylabel('True labels')
     plt.show()
-
-
 
     explainer = shap.TreeExplainer(clf, X_train, feature_perturbation="interventional", model_output='probability')
     shap_values = explainer.shap_values(lstm_feat_4train[cols_feature])
@@ -267,49 +324,54 @@ if __name__ == '__main__':
     shap.dependence_plot('chm', shap_values, lstm_feat_4train, interaction_index=None, show=True)
     shap.dependence_plot('wsci', shap_values, lstm_feat_4train, interaction_index=None, show=True)
 
-
-
     """-----------xgb模型训练结束------------------"""
 
-    probability_Y = np.zeros((demset.rows, demset.cols))
+    probability_Y = np.zeros((demset.rows, demset.cols), dtype=np.float32)
+    # 计算总块数
+    total_blocks = sum(len(w_batches) for w_batches in pre_loader)
 
-    # 提取特征并进行预测
-    lstm_features = []
-    dem_features = []
-    wsci_features = []
+    # 初始化进度条
+    with tqdm(total=total_blocks, desc='Processing blocks') as pbar:
+        for w_batches, d_batches, ws_batches in zip(pre_loader, dem_loader, wsci_loader):
+            for w_batch, d_batch, ws_batch in zip(w_batches, d_batches, ws_batches):
+                wdrvi = w_batch['tensor'].to(device)
+                dem = d_batch['tensor'].cpu().numpy()
+                wsci = ws_batch['tensor'].cpu().numpy()
+                x = w_batch['x']
+                y = w_batch['y']
+                width = w_batch['width']
+                height = w_batch['height']
+                valid_mask = w_batch['valid_mask']
 
-    # 收集所有批次的特征
-    for wdrvi, dem, wsci in zip(pre_loader, dem_loader, wsci_loader):
-        _, out_of_lstm = model(wdrvi.to(device))
-        out_of_lstm = out_of_lstm.cpu().detach().numpy()
-        dem = dem.cpu().detach().numpy()
-        lstm_features.append(out_of_lstm)
-        dem_features.append(dem)
-        wsci_features.append(wsci)
+                with torch.no_grad():
+                    _, out_of_lstm = model(wdrvi)
+                out_of_lstm = out_of_lstm.cpu().numpy()
+                out_of_lstm = out_of_lstm.reshape(out_of_lstm.shape[0], -1)
 
-    # 合并所有批次的特征
-    lstm_features = np.concatenate(lstm_features, axis=0)
-    dem_features = np.concatenate(dem_features, axis=0)
-    wsci_features = np.concatenate(wsci_features, axis=0)
+                dem = dem.reshape(dem.shape[0], -1)
+                wsci = wsci.reshape(wsci.shape[0], -1)
 
+                combined_features = np.concatenate((out_of_lstm, dem, wsci), axis=1)
+                probabilities = clf.predict_proba(combined_features)[:, 1]
 
-    # 将DEM特征添加到LSTM特征的最后一列
-    combined_features = np.concatenate((lstm_features, dem_features[:, None], wsci_features[:, None]), axis=2)
+                # 填入结果图
+                prob_block = np.full((height, width), np.nan, dtype=np.float32)
+                prob_block.flat[valid_mask] = probabilities
 
-    # 预测概率
-    probabilities = clf.predict_proba(combined_features.reshape(-1, combined_features.shape[2]))[:, 1]
+                probability_Y[y:y + height, x:x + width] = prob_block
 
-    # 将预测结果重塑回原始影像的形状
-    probability_Y = probabilities.reshape(demset.rows, demset.cols)
-
-    print("--------用于预测的wdrvi数据经transformer和LSTM结束----------")
+                # 显式释放内存
+                del wdrvi, dem, wsci, out_of_lstm, combined_features, probabilities, prob_block
+                torch.cuda.empty_cache()
+                # 更新进度条
+                pbar.update(1)
 
     # 保存预测结果
     geotransform = demset.geotransform
     projection = demset.projection
     driver = gdal.GetDriverByName('GTiff')
     dst_filename = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\bamboo_inputsize24_seq1_lstm4_batch200_more_merge方案5_xgb默认参数.tif'
-    dst_ds = driver.Create(dst_filename, demset.cols, demset.rows, 1, gdal.GDT_Float64)
+    dst_ds = driver.Create(dst_filename, demset.cols, demset.rows, 1, gdal.GDT_Float32)
     dst_ds.SetGeoTransform(list(geotransform))
     srs = osr.SpatialReference()
     srs.ImportFromWkt(projection)
@@ -317,4 +379,4 @@ if __name__ == '__main__':
     dst_ds.GetRasterBand(1).WriteArray(probability_Y)
 
     endtime = datetime.datetime.now()
-    print((endtime - starttime).seconds)
+    print(f"总用时: {(endtime - starttime).seconds} 秒")

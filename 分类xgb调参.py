@@ -128,26 +128,29 @@ if __name__ == '__main__':
     X, Y = data[[x for x in data.columns if x != 'label' and x != 'id']], data['label']
     X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.3, random_state=5)
 
+
     param_test1 = {
+        'max_depth': range(1, 55, 1),
         'min_child_weight': range(1, 55, 1),
     }
     param_test2 = {
-        "n_estimators": range(0, 250, 1)
+        'gamma': [i / 100.0 for i in range(0, 100)],
     }
-    param_test3 = {'gamma': [0, 1e-5, 1e-2, 0.1, 0.5, 1, 100]}
+    param_test3 = {
+        'subsample': [i / 100.0 for i in range(60, 80)],#[i / 100.0 for i in range(0, 100)], [0.6, 0.7, 0.8, 0.9, 1.0]
+        'colsample_bytree': [i / 100.0 for i in range(80, 100)],
+    }
     param_test4 = {
-        'reg_lambda': [i / 100.0 for i in range(0, 100)],
+        'learning_rate':  [i / 100.0 for i in range(5, 20)],#[0.01, 0.05, 0.1, 0.2]
+        'n_estimators':  range(0, 200, 1)#[100, 200, 300, 500]
     }
-    param_test6 = {
-        'min_child_weight': [i / 100.0 for i in range(0, 101, 1)],
-        'max_depth':range(1, 25, 1),
-    }
-    param_test7 = {
-        'colsample_bytree': [1e-5, 1e-2, 0.1, 1, 100]
+    param_test4 = {
+        'alpha':  [i / 100.0 for i in range(5, 20)],#[0.01, 0.05, 0.1, 0.2]
+        'reg_lambda':  range(0, 200, 1)#[100, 200, 300, 500]
     }
     # 多分类"multi:softprob   num_class=3,"
     gsearch1 = GridSearchCV(estimator=XGBClassifier(objective='binary:logistic', seed=1024, learning_rate=0.1,
-                           max_depth=1,min_child_weight=3,gamma=0.88,subsample=0.12,colsample_bytree=0.21,alpha=0.0,reg_lambda=0.75,n_estimators=200),
+                          max_depth=6, min_child_weight=6,gamma=0.14,colsample_bytree=0.97,subsample=0.67,n_estimators=108,alpha=0,reg_lambda=0.98,),
                             param_grid=param_test2, scoring="roc_auc", cv=5, n_jobs=5)
     #多分类 scoring f1_macro
     # max_depth=1,min_child_weight=3,gamma=0,subsample=0.97,colsample_bytree=0.86,alpha=0.02,reg_lambda=0.22,n_estimators=130
@@ -158,5 +161,6 @@ if __name__ == '__main__':
     print(gsearch1.best_score_)
     reg = gsearch1.best_estimator_
     print('test score : %f'%reg.score(X_test,y_test))
+
 
 
