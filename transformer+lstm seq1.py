@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import Subset, random_split
 from sklearn.metrics import f1_score
 import os
 from torch import nn
@@ -140,20 +141,21 @@ if __name__ == "__main__":
     print(device)
     # 加载数据集
     dataset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')
-    dataset_size = len(dataset)
-    train_size = int(0.7 * dataset_size)
-    val_size = int(0.2 * dataset_size)
-    test_size = dataset_size - train_size - val_size
 
-    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+    indices = np.arange(len(dataset))
+    train_idx, temp_idx = train_test_split(indices, test_size=0.3, random_state=18)
+    val_idx, test_idx = train_test_split(temp_idx, test_size=2 / 3, random_state=18)
+    train_dataset = Subset(dataset, train_idx)
+    val_dataset = Subset(dataset, val_idx)
+    test_dataset = Subset(dataset, test_idx)
 
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
     # 训练模型
-    model = TransformerLSTMEncoder(input_size=24, nhead=8, lstm_input_size=24, num_layers=3, lstm_hidden_size=128,
-                                   lstm_hidden_size2=64, lstm_hidden_size3=16, layer_dim=2, output_dim=2).to(device)  # d_model=20,
+    model = TransformerLSTMEncoder(input_size=24, nhead=8, lstm_input_size=24, num_layers=4, lstm_hidden_size=128,
+                                   lstm_hidden_size2=64, lstm_hidden_size3=32, layer_dim=2, output_dim=2).to(device)  # d_model=20,
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, cooldown=10, verbose=True)
@@ -211,15 +213,15 @@ if __name__ == "__main__":
         scheduler.step(avg_val_loss)
 
         # Early stopping
-        # if avg_val_loss < best_val_loss:
-        #     best_val_loss = avg_val_loss
-        #     epochs_no_improve = 0
-        #     torch.save(model.state_dict(), r'E:\\model_wdrvi_input21_seq1_lstm16_batch200_merge方案5.pt')  # 保存最好模型
-        # else:
-        #     epochs_no_improve += 1
-        #     if epochs_no_improve >= early_stop_patience:
-        #         print('Early stopping triggered!')
-        #         break
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), r'E:\\model_wdrvi_input21_seq1_lstm16_batch200_merge方案5.pt')  # 保存最好模型
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= early_stop_patience:
+                print('Early stopping triggered!')
+                break
     torch.save(model, r'E:\\model_wdrvi_input24_seq1_lstm16_batch200_merge方案5.pt')  # 保存最好模型
     # 绘制曲线
     fig, ax1 = plt.subplots()

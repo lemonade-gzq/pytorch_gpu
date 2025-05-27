@@ -1,5 +1,5 @@
 import torch
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_recall_curve
 import os
 from torch import nn
 from torch.utils.data import Dataset
@@ -250,6 +250,110 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, index):
         return self.x[index], self.y[index]
 
+from matplotlib.colors import LinearSegmentedColormap
+
+# 自定义蓝紫粉渐变，颜色值从 0→1 依次是：亮蓝 → 紫 → 亮粉
+bright_bpf = LinearSegmentedColormap.from_list(
+    "bright_bpf",
+    ["#0089fa", "#af11a5", "#ff0053"],  # 深天蓝 → 紫罗兰 → 热粉
+    N=256
+)
+def shap_summary_plot_vector(shap_values, features, feature_names=None, max_display=12,
+                             output_file='shap_summary_custom.pdf', cmap= bright_bpf):
+
+
+    if isinstance(shap_values, list):
+        shap_values = shap_values[1]
+
+    if isinstance(shap_values, pd.DataFrame):
+        shap_values = shap_values.values
+    if isinstance(features, pd.DataFrame):
+        feature_names = features.columns.tolist() if feature_names is None else feature_names
+        features = features.values
+    else:
+        if feature_names is None:
+            feature_names = [f"Feature {i}" for i in range(shap_values.shape[1])]
+
+    # 计算特征重要性排序（最重要放最上面）
+    mean_abs_shap = np.abs(shap_values).mean(axis=0)
+    top_indices = np.argsort(mean_abs_shap)[::-1][:max_display]
+
+    fig, ax = plt.subplots(figsize=(8, 0.4 * max_display + 1))
+
+    for plot_y, i in enumerate(top_indices[::-1]):  # 反转顺序：重要的在最上面
+        y = np.full_like(shap_values[:, i], fill_value=plot_y, dtype=float)
+        color = features[:, i]
+        shap_val = shap_values[:, i]
+
+        # 按照颜色值排序，确保颜色值大的在后面绘制
+        order = np.argsort(color)
+
+        ax.scatter(
+            shap_val[order],
+            (y + np.random.uniform(-0.2, 0.2, size=y.shape))[order],
+            c=color[order],
+            cmap=cmap,
+            alpha=1,
+            s=5  # 更小的点
+        )
+
+    ax.set_yticks(range(len(top_indices)))
+    ax.set_yticklabels([feature_names[i] for i in top_indices[::-1]], fontsize=10)
+    ax.set_xlabel("SHAP value (impact on model output)", fontsize=12)
+    ax.set_title("SHAP Summary Plot", fontsize=14)
+    ax.grid(True, axis='x', linestyle='--', linewidth=0.5)
+
+    # 添加 colorbar（用最新的norm）
+    sm = plt.cm.ScalarMappable(cmap=cmap)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, pad=0.01)
+    cbar.set_label("Feature value", fontsize=10)
+
+    plt.tight_layout()
+    plt.savefig(output_file, format='pdf')
+    plt.close()
+    print(f"✅ 矢量 SHAP summary plot 已保存至：{output_file}")
+
+
+def dependence_plot_vector(feature, shap_values, features, feature_names=None, interaction_index=None,
+                           output_file='dependence_plot_custom.pdf'):
+
+
+
+    if isinstance(shap_values, list):
+        shap_values = shap_values[1]  # 分类模型情况
+
+    if isinstance(features, pd.DataFrame):
+        feature_names = features.columns.tolist() if feature_names is None else feature_names
+        features = features.values
+    else:
+        if feature_names is None:
+            feature_names = [f"Feature {i}" for i in range(shap_values.shape[1])]
+
+    feature_index = feature_names.index(feature)
+
+    # 如果未指定交互特征，默认用自己
+    if interaction_index is None:
+        interaction_index = feature_index
+    elif isinstance(interaction_index, str):
+        interaction_index = feature_names.index(interaction_index)
+
+    x = features[:, feature_index]
+    y = shap_values[:, feature_index]
+    color = features[:, interaction_index]
+
+    plt.figure(figsize=(6, 4))
+    sc = plt.scatter(x, y, c=color, cmap=bright_bpf, alpha=1, s=5)  # 小点，无边框
+    plt.xlabel(f'{feature} value', fontsize=12)
+    plt.ylabel(f'SHAP value for {feature}', fontsize=12)
+    plt.title(f'Dependence Plot: {feature}', fontsize=14)
+    plt.grid(True, linestyle='--', linewidth=0.5)
+    plt.colorbar(sc, label=f'{feature_names[interaction_index]}', pad=0.01)
+
+    plt.tight_layout()
+    plt.savefig(output_file, format='pdf')
+    plt.close()
+    print(f"✅ 矢量 dependence plot 已保存至：{output_file}")
 
 
 
@@ -261,11 +365,14 @@ if __name__ == '__main__':
     pre_loader = DataLoader(tifset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
     #DataLoader的默认：default_collate，会把 batch 里的每个元素拼接成一个大的tensor，这在分块读取栅格的时候会造成报错：每个块的大小不一致
 
-    demset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
-    dem_loader = DataLoader(demset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
+    chmset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\icesat_chm_2502re.tif")
+    chm_loader = DataLoader(chmset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
 
     wsciset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\vsc\wsci_re.tif")
     wsci_loader = DataLoader(wsciset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
+    
+    demset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\卧龙dem.tif")
+    dem_loader = DataLoader(demset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
 
     csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')
     train_loader = DataLoader(csvset, batch_size=20, shuffle=False)
@@ -293,11 +400,20 @@ if __name__ == '__main__':
     print("--------用于训练xgb的数据准备结束（补充dem在最后一列）----------")
     cols_feature = ['feature{}'.format(i) for i in range(32)] + ['chm', 'wsci']
     lstm_feat_4train = pd.DataFrame(lstm_feat_4train, columns=cols_feature)
+    # lstm_feat_4train.to_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\feature.csv', index=False, encoding='utf-8')
 
     """-----------开始构建xgb模型------------------"""
-    X_train, X_test, y_train, y_test = train_test_split(lstm_feat_4train, label_4train, test_size=0.3, random_state=5, shuffle=True)
-    clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1,
-                        max_depth=6, min_child_weight=6, gamma=0.14, colsample_bytree=0.97, subsample=0.67)
+    X_train, X_test, y_train, y_test = train_test_split(lstm_feat_4train, label_4train, test_size=0.3, random_state=18, shuffle=True)
+
+    lstm_feat_4train["is_test"] = False
+    test_indices = X_test.index
+    lstm_feat_4train.loc[test_indices, "is_test"] = True
+    # lstm_feat_4train.to_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\feature.csv', index=False, encoding='utf-8')
+    lstm_feat_4train.drop(columns=["is_test"], inplace=True)
+
+    clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1, max_depth=1,
+                        min_child_weight=2,gamma=0.99,colsample_bytree=0.01,subsample=0.42,reg_lambda=0.17,alpha=0.0,n_estimators=76
+                        )
     clf.fit(X_train, y_train)
     test_predict = clf.predict(X_test)
 
@@ -308,6 +424,29 @@ if __name__ == '__main__':
     print("R2:", r2_score(y_test, test_predict))
     print("acc:", accuracy_score(y_test, test_predict))
     print("F1:", f1_score(y_test, test_predict))
+
+    # 获取正类预测概率
+    probs = clf.predict_proba(X_test)[:, 1]
+
+    # 构建阈值-性能曲线
+    precisions, recalls, thresholds = precision_recall_curve(y_test, probs)
+
+    # 计算每个阈值对应的 F1 分数
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)  # 加1e-8防止除零
+
+    # 找到 F1 最大的阈值索引
+    best_index = np.argmax(f1_scores)
+    best_threshold = thresholds[best_index]
+    best_f1 = f1_scores[best_index]
+
+    # 用最佳阈值生成分类结果
+    y_pred_best = (probs >= best_threshold).astype(int)
+
+    # 输出结果
+    print(f"最佳 F1 阈值: {best_threshold:.4f}")
+    print(f"对应 F1 分数: {best_f1:.4f}")
+    print("准确率:", metrics.accuracy_score(y_test, y_pred_best))
+    print("AUC:", metrics.roc_auc_score(y_test, probs))
 
     confusion_matrix_result = metrics.confusion_matrix(test_predict, y_test)
     print('The confusion matrix result:\n', confusion_matrix_result)
@@ -324,6 +463,30 @@ if __name__ == '__main__':
     shap.dependence_plot('chm', shap_values, lstm_feat_4train, interaction_index=None, show=True)
     shap.dependence_plot('wsci', shap_values, lstm_feat_4train, interaction_index=None, show=True)
 
+    # Summary plot
+    shap_summary_plot_vector(
+        shap_values=shap_values,
+        features=lstm_feat_4train[cols_feature],
+        feature_names=cols_feature,
+        output_file='summary_vector_plot.pdf'
+    )
+
+    # Dependence plot for 'wsci'
+    dependence_plot_vector(
+        feature='wsci',
+        shap_values=shap_values,
+        features=lstm_feat_4train[cols_feature],
+        feature_names=cols_feature,
+        output_file='dependence_wsci.pdf'
+    )
+    dependence_plot_vector(
+        feature='chm',
+        shap_values=shap_values,
+        features=lstm_feat_4train[cols_feature],
+        feature_names=cols_feature,
+        output_file='dependence_chm.pdf'
+    )
+
     """-----------xgb模型训练结束------------------"""
 
     probability_Y = np.zeros((demset.rows, demset.cols), dtype=np.float32)
@@ -332,11 +495,12 @@ if __name__ == '__main__':
 
     # 初始化进度条
     with tqdm(total=total_blocks, desc='Processing blocks') as pbar:
-        for w_batches, d_batches, ws_batches in zip(pre_loader, dem_loader, wsci_loader):
-            for w_batch, d_batch, ws_batch in zip(w_batches, d_batches, ws_batches):
+        for w_batches, chm_batches, ws_batches, dem_batches in zip(pre_loader, chm_loader, wsci_loader, dem_loader):
+            for w_batch, chm_batch, ws_batch, dem_batch in zip(w_batches, chm_batches, ws_batches):
                 wdrvi = w_batch['tensor'].to(device)
-                dem = d_batch['tensor'].cpu().numpy()
+                chm = chm_batch['tensor'].cpu().numpy()
                 wsci = ws_batch['tensor'].cpu().numpy()
+                dem = dem_batch['tensor'].cpu().numpy()
                 x = w_batch['x']
                 y = w_batch['y']
                 width = w_batch['width']
@@ -348,10 +512,11 @@ if __name__ == '__main__':
                 out_of_lstm = out_of_lstm.cpu().numpy()
                 out_of_lstm = out_of_lstm.reshape(out_of_lstm.shape[0], -1)
 
-                dem = dem.reshape(dem.shape[0], -1)
+                chm = chm.reshape(chm.shape[0], -1)
                 wsci = wsci.reshape(wsci.shape[0], -1)
+                dem = dem.reshape(dem.shape[0], -1)
 
-                combined_features = np.concatenate((out_of_lstm, dem, wsci), axis=1)
+                combined_features = np.concatenate((out_of_lstm, chm, wsci, dem), axis=1)
                 probabilities = clf.predict_proba(combined_features)[:, 1]
 
                 # 填入结果图
@@ -361,7 +526,7 @@ if __name__ == '__main__':
                 probability_Y[y:y + height, x:x + width] = prob_block
 
                 # 显式释放内存
-                del wdrvi, dem, wsci, out_of_lstm, combined_features, probabilities, prob_block
+                del wdrvi, dem, chm, wsci, out_of_lstm, combined_features, probabilities, prob_block
                 torch.cuda.empty_cache()
                 # 更新进度条
                 pbar.update(1)

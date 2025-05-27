@@ -122,36 +122,36 @@ def extract_features(model, dataloader):
 
 
 if __name__ == '__main__':
-    data = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv', header=0, index_col=0, encoding='utf-8')
+    data = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\feature.csv', header=0, index_col=0, encoding='utf-8')
     data = data.iloc[:, :]
     data.info()
     X, Y = data[[x for x in data.columns if x != 'label' and x != 'id']], data['label']
-    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.3, random_state=5)
+    X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.3, random_state=18)
 
 
     param_test1 = {
-        'max_depth': range(1, 55, 1),
+        # 'max_depth': range(1, 55, 1),
         'min_child_weight': range(1, 55, 1),
     }
     param_test2 = {
         'gamma': [i / 100.0 for i in range(0, 100)],
     }
     param_test3 = {
-        'subsample': [i / 100.0 for i in range(60, 80)],#[i / 100.0 for i in range(0, 100)], [0.6, 0.7, 0.8, 0.9, 1.0]
-        'colsample_bytree': [i / 100.0 for i in range(80, 100)],
+        'subsample':[i / 100.0 for i in range(1, 100)],#[i / 100.0 for i in range(0, 100)], [0.6, 0.7, 0.8, 0.9, 1.0]
+        # 'colsample_bytree':[i / 100.0 for i in range(1, 100)],
     }
     param_test4 = {
-        'learning_rate':  [i / 100.0 for i in range(5, 20)],#[0.01, 0.05, 0.1, 0.2]
+        # 'learning_rate':  [i / 100.0 for i in range(5, 20)],#[0.01, 0.05, 0.1, 0.2]
         'n_estimators':  range(0, 200, 1)#[100, 200, 300, 500]
     }
-    param_test4 = {
-        'alpha':  [i / 100.0 for i in range(5, 20)],#[0.01, 0.05, 0.1, 0.2]
-        'reg_lambda':  range(0, 200, 1)#[100, 200, 300, 500]
+    param_test5 = {
+        'alpha': [i / 100.0 for i in range(0, 100)],#[0.01, 0.05, 0.1, 0.2]
+        # 'reg_lambda': [i / 100.0 for i in range(0, 100)]#[0.01, 0.05, 0.1, 0.2]
     }
     # 多分类"multi:softprob   num_class=3,"
     gsearch1 = GridSearchCV(estimator=XGBClassifier(objective='binary:logistic', seed=1024, learning_rate=0.1,
-                          max_depth=6, min_child_weight=6,gamma=0.14,colsample_bytree=0.97,subsample=0.67,n_estimators=108,alpha=0,reg_lambda=0.98,),
-                            param_grid=param_test2, scoring="roc_auc", cv=5, n_jobs=5)
+                          max_depth=1,min_child_weight=2,gamma=0.99,colsample_bytree=0.01,subsample=0.42,reg_lambda=0.17,alpha=0.0,n_estimators=76),
+                            param_grid=param_test5, scoring="roc_auc", cv=5, n_jobs=5)
     #多分类 scoring f1_macro
     # max_depth=1,min_child_weight=3,gamma=0,subsample=0.97,colsample_bytree=0.86,alpha=0.02,reg_lambda=0.22,n_estimators=130
     #  0, 0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.1,0.2,0.3,0.4, 0.5,1
