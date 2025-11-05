@@ -374,7 +374,7 @@ if __name__ == '__main__':
     demset = ADDDataSet2(r"E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\卧龙dem.tif")
     dem_loader = DataLoader(demset, batch_size=20, shuffle=False, collate_fn=no_stack_collate)
 
-    csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv')
+    csvset = TimeSeriesDataset(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5_baseline.csv')
     train_loader = DataLoader(csvset, batch_size=20, shuffle=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -394,12 +394,14 @@ if __name__ == '__main__':
 
     df_4train = pd.read_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\WDRVI_sample_merge方案5.csv', header=0, index_col=0,
                             encoding='utf-8')
-    dem_4train = df_4train.iloc[:, -2:].values.reshape(-1, 2)
+    dem_4train = df_4train.iloc[:, -3:-1].values.reshape(-1, 2)
     label_4train = df_4train.iloc[:, 0].values
     lstm_feat_4train = np.append(lstm_feat_4train, dem_4train, 1)
     print("--------用于训练xgb的数据准备结束（补充dem在最后一列）----------")
     cols_feature = ['feature{}'.format(i) for i in range(32)] + ['chm', 'wsci']
     lstm_feat_4train = pd.DataFrame(lstm_feat_4train, columns=cols_feature)
+    lstm_feat_4train = pd.DataFrame(lstm_feat_4train)
+
     # lstm_feat_4train.to_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\feature.csv', index=False, encoding='utf-8')
 
     """-----------开始构建xgb模型------------------"""
@@ -410,9 +412,9 @@ if __name__ == '__main__':
     lstm_feat_4train.loc[test_indices, "is_test"] = True
     # lstm_feat_4train.to_csv(r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\feature.csv', index=False, encoding='utf-8')
     lstm_feat_4train.drop(columns=["is_test"], inplace=True)
-
-    clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1, max_depth=1,
-                        min_child_weight=2,gamma=0.99,colsample_bytree=0.01,subsample=0.42,reg_lambda=0.17,alpha=0.0,n_estimators=76
+#
+    clf = XGBClassifier(objective="binary:logistic", seed=1024, learning_rate=0.1,
+                        max_depth=1,min_child_weight=2,gamma=0.99,colsample_bytree=0.01,subsample=0.42,reg_lambda=0.17,alpha=0.0,n_estimators=76
                         )
     clf.fit(X_train, y_train)
     test_predict = clf.predict(X_test)
@@ -458,7 +460,7 @@ if __name__ == '__main__':
 
     explainer = shap.TreeExplainer(clf, X_train, feature_perturbation="interventional", model_output='probability')
     shap_values = explainer.shap_values(lstm_feat_4train[cols_feature])
-    shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], max_display=12)
+    shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], max_display=32)
     shap.summary_plot(shap_values, lstm_feat_4train[cols_feature], plot_type="bar")
     shap.dependence_plot('chm', shap_values, lstm_feat_4train, interaction_index=None, show=True)
     shap.dependence_plot('wsci', shap_values, lstm_feat_4train, interaction_index=None, show=True)
@@ -468,7 +470,7 @@ if __name__ == '__main__':
         shap_values=shap_values,
         features=lstm_feat_4train[cols_feature],
         feature_names=cols_feature,
-        output_file='summary_vector_plot.pdf'
+        # output_file='summary_vector_plot.pdf'
     )
 
     # Dependence plot for 'wsci'
@@ -477,14 +479,14 @@ if __name__ == '__main__':
         shap_values=shap_values,
         features=lstm_feat_4train[cols_feature],
         feature_names=cols_feature,
-        output_file='dependence_wsci.pdf'
+        # output_file='dependence_wsci.pdf'
     )
     dependence_plot_vector(
         feature='chm',
         shap_values=shap_values,
         features=lstm_feat_4train[cols_feature],
         feature_names=cols_feature,
-        output_file='dependence_chm.pdf'
+        # output_file='dependence_chm.pdf'
     )
 
     """-----------xgb模型训练结束------------------"""
@@ -496,7 +498,7 @@ if __name__ == '__main__':
     # 初始化进度条
     with tqdm(total=total_blocks, desc='Processing blocks') as pbar:
         for w_batches, chm_batches, ws_batches, dem_batches in zip(pre_loader, chm_loader, wsci_loader, dem_loader):
-            for w_batch, chm_batch, ws_batch, dem_batch in zip(w_batches, chm_batches, ws_batches):
+            for w_batch, chm_batch, ws_batch, dem_batch in zip(w_batches, chm_batches, ws_batches, dem_batches):
                 wdrvi = w_batch['tensor'].to(device)
                 chm = chm_batch['tensor'].cpu().numpy()
                 wsci = ws_batch['tensor'].cpu().numpy()
@@ -535,7 +537,7 @@ if __name__ == '__main__':
     geotransform = demset.geotransform
     projection = demset.projection
     driver = gdal.GetDriverByName('GTiff')
-    dst_filename = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\bamboo_inputsize24_seq1_lstm4_batch200_more_merge方案5_xgb默认参数.tif'
+    dst_filename = r'E:\城市与区域生态\大熊猫和竹\竹子分布模拟\冠层高度模型\bamboo_inputsize24_seq1_lstm4_batch200_more_merge方案5_xgb_dem.tif'
     dst_ds = driver.Create(dst_filename, demset.cols, demset.rows, 1, gdal.GDT_Float32)
     dst_ds.SetGeoTransform(list(geotransform))
     srs = osr.SpatialReference()
